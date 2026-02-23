@@ -6,7 +6,7 @@ import fnmatch
 from h2c import (
     ConvertContext, ProviderResult, Provider,
     resolve_env, _convert_command,
-    _convert_volume_mounts, _build_vol_map,
+    _convert_volume_mounts,
     _resolve_named_port,
 )
 
@@ -16,15 +16,6 @@ _WORKLOAD_KINDS = ("DaemonSet", "Deployment", "Job", "StatefulSet")
 def _is_excluded(name: str, exclude_list: list[str]) -> bool:
     """Check if a workload name matches any exclude pattern (supports wildcards)."""
     return any(fnmatch.fnmatch(name, pattern) for pattern in exclude_list)
-
-
-def _get_run_as_user(pod_spec: dict, container: dict) -> int | None:
-    """Extract runAsUser from container or pod securityContext (container wins)."""
-    for ctx in (container.get("securityContext") or {}, pod_spec.get("securityContext") or {}):
-        uid = ctx.get("runAsUser")
-        if uid is not None:
-            return int(uid)
-    return None
 
 
 def _get_exposed_ports(workload_labels: dict, container_ports: list,
@@ -47,22 +38,6 @@ def _get_exposed_ports(workload_labels: dict, container_ports: list,
                         node_port = _resolve_named_port(node_port, container_ports)
                     ports.append(f"{node_port}:{target}")
     return ports
-
-
-def _collect_fix_permissions(pod_spec: dict, container: dict,
-                             fix_permissions: dict | None,
-                             vcts: list | None = None) -> None:
-    """Collect PVC claims needing permission fixes for non-root containers."""
-    if fix_permissions is None:
-        return
-    uid = _get_run_as_user(pod_spec, container)
-    if not uid or uid <= 0:
-        return
-    vol_map = _build_vol_map(pod_spec.get("volumes") or [], vcts)
-    for vm in container.get("volumeMounts") or []:
-        source = vol_map.get(vm.get("name", ""), {})
-        if source.get("type") == "pvc":
-            fix_permissions[source["claim"]] = uid
 
 
 def _build_aux_service(container: dict, pod_spec: dict, label: str,
@@ -124,7 +99,6 @@ def _convert_sidecar_containers(pod_spec: dict, name: str, ctx: ConvertContext,
                 "depends_on": [name]}
         svc = _build_aux_service(sc, pod_spec, f"sidecar/{sc_svc_name}",
                                  ctx, base, vcts)
-        _collect_fix_permissions(pod_spec, sc, ctx.fix_permissions, vcts)
         result[sc_svc_name] = svc
     return result
 
@@ -228,7 +202,5 @@ class WorkloadConverter(Provider):
         resources = container.get("resources", {})
         if resources.get("limits") or resources.get("requests"):
             ctx.warnings.append(f"resource limits on {full} ignored")
-
-        _collect_fix_permissions(pod_spec, container, ctx.fix_permissions, vcts)
 
         return svc
