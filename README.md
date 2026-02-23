@@ -1,6 +1,6 @@
-# h2c-converter-workload
+# h2c-provider-simple-workload
 
-Workload converter for [helmfile2compose](https://github.com/helmfile2compose/helmfile2compose) — converts Deployment, StatefulSet, DaemonSet, and Job manifests into compose services.
+Simple workload provider for [helmfile2compose](https://github.com/helmfile2compose/helmfile2compose) — converts Deployment, StatefulSet, DaemonSet, and Job manifests into compose services. Naively maps each workload to a compose service without attempting to emulate scheduling, scaling, or lifecycle management.
 
 **The Builder** — one of the Eight Monks, the founding extensions of the helmfile2compose distribution.
 

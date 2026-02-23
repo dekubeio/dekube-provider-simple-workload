@@ -103,9 +103,9 @@ def _convert_sidecar_containers(pod_spec: dict, name: str, ctx: ConvertContext,
     return result
 
 
-class WorkloadConverter(Provider):
+class SimpleWorkloadProvider(Provider):
     """Convert DaemonSet, Deployment, Job, StatefulSet manifests to compose services."""
-    name = "workloads"
+    name = "simple-workload"
     kinds = list(_WORKLOAD_KINDS)
     priority = 500
 
