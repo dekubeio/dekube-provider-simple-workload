@@ -95,6 +95,8 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 svc_type = svc_info.get("type", "ClusterIP")
                 if svc_type in ("NodePort", "LoadBalancer"):
                     for sp in svc_info.get("ports") or []:
+                        if not sp:
+                            continue
                         target = sp.get("targetPort", sp.get("port"))
                         if isinstance(target, str):
                             target = resolve_named_port(target, container_ports)
@@ -138,6 +140,8 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         """Convert init containers to separate compose services with restart: on-failure."""
         result = {}
         for ic in pod_spec.get("initContainers") or []:
+            if not ic:
+                continue
             ic_name = ic.get("name", "init")
             ic_svc_name = f"{name}-init-{ic_name}"
             if SimpleWorkloadProvider._is_excluded(ic_svc_name, ctx.config.get("exclude", [])):
@@ -157,6 +161,8 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         project = ctx.config.get("name", "")
         cn = f"{project}-{name}" if project else name
         for sc in (pod_spec.get("containers") or [])[1:]:
+            if not sc:
+                continue
             sc_name = sc.get("name", "sidecar")
             sc_svc_name = f"{name}-sidecar-{sc_name}"
             if SimpleWorkloadProvider._is_excluded(sc_svc_name, ctx.config.get("exclude", [])):
@@ -187,7 +193,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
     def _convert_one(self, manifest: dict, ctx: ConvertContext,
                      restart_policy: str = "always") -> dict | None:
         """Convert a single workload manifest to compose service(s)."""
-        meta = manifest.get("metadata", {})
+        meta = manifest.get("metadata") or {}
         name = meta.get("name", "unknown")
         full = f"{manifest.get('kind', '?')}/{name}"
 
@@ -195,7 +201,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             return None
 
         # Skip workloads scaled to zero (e.g. disabled AI services)
-        replicas = manifest.get("spec", {}).get("replicas")
+        replicas = (manifest.get("spec") or {}).get("replicas")
         if replicas is not None and replicas == 0:
             ctx.warnings.append(f"{full} has replicas: 0 — skipped")
             return None
