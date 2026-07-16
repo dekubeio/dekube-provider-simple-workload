@@ -1,7 +1,6 @@
 """Workload conversion — Deployment, StatefulSet, DaemonSet, Job to compose services."""
 # pylint: disable=too-many-locals
 
-import fnmatch
 import shlex
 
 from dekube import (  # pylint: disable=import-error  # h2c resolves at runtime
@@ -9,6 +8,7 @@ from dekube import (  # pylint: disable=import-error  # h2c resolves at runtime
     resolve_env, convert_command,
     convert_volume_mounts,
     resolve_named_port,
+    is_excluded,
 )
 
 _WORKLOAD_KINDS = ("DaemonSet", "Deployment", "Job", "Pod", "StatefulSet")
@@ -78,11 +78,6 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         return mem
 
     @staticmethod
-    def _is_excluded(name: str, exclude_list: list[str]) -> bool:
-        """Check if a workload name matches any exclude pattern (supports wildcards)."""
-        return any(fnmatch.fnmatch(name, pattern) for pattern in exclude_list)
-
-    @staticmethod
     def _get_exposed_ports(workload_labels: dict, container_ports: list,
                            services_by_selector: dict) -> list[str]:
         """Determine which ports to expose based on K8s Service type."""
@@ -144,7 +139,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 continue
             ic_name = ic.get("name", "init")
             ic_svc_name = f"{name}-init-{ic_name}"
-            if SimpleWorkloadProvider._is_excluded(ic_svc_name, ctx.config.get("exclude", [])):
+            if is_excluded(ic_svc_name, ctx.config.get("exclude", [])):
                 continue
             svc = SimpleWorkloadProvider._build_aux_service(
                 ic, pod_spec, f"initContainer/{ic_svc_name}",
@@ -165,7 +160,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 continue
             sc_name = sc.get("name", "sidecar")
             sc_svc_name = f"{name}-sidecar-{sc_name}"
-            if SimpleWorkloadProvider._is_excluded(sc_svc_name, ctx.config.get("exclude", [])):
+            if is_excluded(sc_svc_name, ctx.config.get("exclude", [])):
                 continue
             base = {"restart": restart_policy, "network_mode": f"container:{cn}",
                     "depends_on": [name]}
@@ -197,7 +192,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         name = meta.get("name", "unknown")
         full = f"{manifest.get('kind', '?')}/{name}"
 
-        if self._is_excluded(name, ctx.config.get("exclude", [])):
+        if is_excluded(name, ctx.config.get("exclude", [])):
             return None
 
         # Skip workloads scaled to zero (e.g. disabled AI services)
