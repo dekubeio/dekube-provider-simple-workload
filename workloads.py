@@ -104,7 +104,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
     @staticmethod
     def _build_aux_service(container: dict, pod_spec: dict, label: str,
                            ctx: ConvertContext, base: dict,
-                           vcts: list | None = None) -> dict:
+                           vcts: list | None = None, sts_name: str | None = None) -> dict:
         """Build a compose service dict for an init or sidecar container."""
         svc = dict(base)
         if container.get("image"):
@@ -124,14 +124,15 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             output_dir=ctx.output_dir, generated_cms=ctx.generated_cms,
             generated_secrets=ctx.generated_secrets, replacements=ctx.replacements,
             service_port_map=ctx.service_port_map,
-            volume_claim_templates=vcts)
+            volume_claim_templates=vcts,
+            sts_name=sts_name)
         if volumes:
             svc["volumes"] = volumes
         return svc
 
     @staticmethod
     def _convert_init_containers(pod_spec: dict, name: str, ctx: ConvertContext,
-                                 vcts: list | None = None) -> dict:
+                                 vcts: list | None = None, sts_name: str | None = None) -> dict:
         """Convert init containers to separate compose services with restart: on-failure."""
         result = {}
         for ic in pod_spec.get("initContainers") or []:
@@ -143,14 +144,15 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 continue
             svc = SimpleWorkloadProvider._build_aux_service(
                 ic, pod_spec, f"initContainer/{ic_svc_name}",
-                ctx, {"restart": "on-failure"}, vcts)
+                ctx, {"restart": "on-failure"}, vcts, sts_name)
             result[ic_svc_name] = svc
         return result
 
     @staticmethod
     def _convert_sidecar_containers(pod_spec: dict, name: str, ctx: ConvertContext,
                                     restart_policy: str = "always",
-                                    vcts: list | None = None) -> dict:
+                                    vcts: list | None = None,
+                                    sts_name: str | None = None) -> dict:
         """Convert sidecar containers to compose services sharing the main service's network."""
         result = {}
         project = ctx.config.get("name", "")
@@ -165,7 +167,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             base = {"restart": restart_policy, "network_mode": f"container:{cn}",
                     "depends_on": [name]}
             svc = SimpleWorkloadProvider._build_aux_service(sc, pod_spec, f"sidecar/{sc_svc_name}",
-                                                            ctx, base, vcts)
+                                                            ctx, base, vcts, sts_name)
             result[sc_svc_name] = svc
         return result
 
@@ -205,17 +207,21 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         kind = manifest.get("kind", "")
         if kind == "Pod":
             pod_spec = spec
+            pod_labels = meta.get("labels") or {}
         else:
-            pod_spec = (spec.get("template") or {}).get("spec") or {}
+            template = spec.get("template") or {}
+            pod_spec = template.get("spec") or {}
+            pod_labels = (template.get("metadata") or {}).get("labels") or {}
         vcts = spec.get("volumeClaimTemplates")  # StatefulSet only
+        sts_name = name if vcts else None
         containers = pod_spec.get("containers") or []
         if not containers:
             ctx.warnings.append(f"{full} has no containers — skipped")
             return None
 
-        result = self._convert_init_containers(pod_spec, name, ctx, vcts=vcts)
-        svc = self._build_service(containers[0], pod_spec, meta, full,
-                                  ctx, restart_policy, vcts)
+        result = self._convert_init_containers(pod_spec, name, ctx, vcts=vcts, sts_name=sts_name)
+        svc = self._build_service(containers[0], pod_spec, meta, pod_labels, full,
+                                  ctx, restart_policy, vcts, sts_name)
         init_names = [k for k in result]
         if init_names:
             svc.setdefault("depends_on", {}).update(
@@ -227,15 +233,15 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             cn = f"{project}-{name}" if project else name
             svc["container_name"] = cn
             sidecar_result = self._convert_sidecar_containers(
-                pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts)
+                pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts, sts_name=sts_name)
             result.update(sidecar_result)
 
         return result
 
     @staticmethod
-    def _build_service(container: dict, pod_spec: dict, meta: dict, full: str,
+    def _build_service(container: dict, pod_spec: dict, meta: dict, pod_labels: dict, full: str,
                        ctx: ConvertContext, restart_policy: str,
-                       vcts: list | None) -> dict:
+                       vcts: list | None, sts_name: str | None = None) -> dict:
         """Build a compose service dict from a K8s container spec."""
         svc = {"restart": restart_policy}
 
@@ -255,7 +261,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
 
         # Ports
         exposed_ports = SimpleWorkloadProvider._get_exposed_ports(
-            meta.get("labels") or {},
+            pod_labels,
             container.get("ports") or [],
             ctx.services_by_selector)
         if exposed_ports:
@@ -270,7 +276,8 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             generated_cms=ctx.generated_cms, generated_secrets=ctx.generated_secrets,
             replacements=ctx.replacements,
             service_port_map=ctx.service_port_map,
-            volume_claim_templates=vcts)
+            volume_claim_templates=vcts,
+            sts_name=sts_name)
         if svc_volumes:
             svc["volumes"] = svc_volumes
 
