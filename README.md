@@ -10,6 +10,10 @@ Simple workload provider for [dekube](https://dekube.io) — converts Deployment
 
 `Provider` (priority 500)
 
+## Requires
+
+dekube-engine >= v1.6.0 — passes `sts_name=` to `convert_volume_mounts`, which older engines reject with `TypeError`.
+
 ## Kinds
 
 - `Deployment`
