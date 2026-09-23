@@ -133,11 +133,17 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
     @staticmethod
     def _convert_init_containers(pod_spec: dict, name: str, ctx: ConvertContext,
                                  vcts: list | None = None, sts_name: str | None = None) -> dict:
-        """Convert init containers to separate compose services with restart: on-failure."""
+        """Convert init containers to separate compose services with restart: on-failure.
+
+        Native sidecars (restartPolicy: Always) are skipped here — they run alongside
+        the main container, not as blocking inits. See _convert_native_sidecars.
+        """
         result = {}
         for ic in pod_spec.get("initContainers") or []:
             if not ic:
                 continue
+            if ic.get("restartPolicy") == "Always":
+                continue  # native sidecar, see _convert_native_sidecars
             ic_name = ic.get("name", "init")
             ic_svc_name = f"{name}-init-{ic_name}"
             if is_excluded(ic_svc_name, ctx.config.get("exclude", [])):
@@ -169,6 +175,32 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             svc = SimpleWorkloadProvider._build_aux_service(sc, pod_spec, f"sidecar/{sc_svc_name}",
                                                             ctx, base, vcts, sts_name)
             result[sc_svc_name] = svc
+        return result
+
+    @staticmethod
+    def _convert_native_sidecars(pod_spec: dict, name: str, ctx: ConvertContext,
+                                 restart_policy: str = "always", vcts: list | None = None,
+                                 sts_name: str | None = None) -> dict:
+        """K8s native sidecars (initContainers with restartPolicy: Always) run alongside main.
+
+        Kept under the init naming (<name>-init-<cname>) so iter_named_containers still matches.
+        CBA: attached to main's network namespace, so one-shot init containers that need it
+        (e.g. migrate through cloud-sql-proxy) still can't reach it — same limitation as every
+        init container today; fix would need a shared pause-like netns service.
+        """
+        result = {}
+        project = ctx.config.get("name", "")
+        cn = f"{project}-{name}" if project else name
+        for ic in pod_spec.get("initContainers") or []:
+            if not ic or ic.get("restartPolicy") != "Always":
+                continue
+            ic_svc_name = f"{name}-init-{ic.get('name', 'init')}"
+            if is_excluded(ic_svc_name, ctx.config.get("exclude", [])):
+                continue
+            base = {"restart": restart_policy, "network_mode": f"container:{cn}",
+                    "depends_on": [name]}
+            result[ic_svc_name] = SimpleWorkloadProvider._build_aux_service(
+                ic, pod_spec, f"sidecar/{ic_svc_name}", ctx, base, vcts, sts_name)
         return result
 
     def convert(self, kind: str, manifests: list[dict], ctx: ConvertContext) -> ProviderResult:
@@ -228,13 +260,17 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 {n: {"condition": "service_completed_successfully"} for n in init_names})
         result[name] = svc
 
-        if len(containers) > 1:
+        native = self._convert_native_sidecars(pod_spec, name, ctx, restart_policy=restart_policy,
+                                               vcts=vcts, sts_name=sts_name)
+        if len(containers) > 1 or native:
+            # network_mode: container:<cn> needs an exact container name
             project = ctx.config.get("name", "")
             cn = f"{project}-{name}" if project else name
             svc["container_name"] = cn
-            sidecar_result = self._convert_sidecar_containers(
-                pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts, sts_name=sts_name)
-            result.update(sidecar_result)
+        if len(containers) > 1:
+            result.update(self._convert_sidecar_containers(
+                pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts, sts_name=sts_name))
+        result.update(native)
 
         return result
 
