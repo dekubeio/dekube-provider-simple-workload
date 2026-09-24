@@ -32,15 +32,44 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 hc["test"] = ["CMD"] + cmd
         elif "httpGet" in probe:
             http = probe["httpGet"]
-            port = http.get("port", 80)
+            port = http.get("port") or 80
             if isinstance(port, str):
                 port = resolve_named_port(port, container_ports or [])
-            path = http.get("path", "/")
-            scheme = http.get("scheme", "HTTP").lower()
-            host = http.get("host", "localhost")
+            path = http.get("path") or "/"
+            scheme = (http.get("scheme") or "HTTP").lower()
+            host = http.get("host") or "localhost"
+            headers = [(h["name"], h.get("value") or "")
+                       for h in (http.get("httpHeaders") or []) if h and h.get("name")]
             url = shlex.quote(f"{scheme}://{host}:{port}{path}")
+            wget_hdr = "".join(f" --header={shlex.quote(f'{n}: {v}')}" for n, v in headers)
+            curl_hdr = "".join(f" -H {shlex.quote(f'{n}: {v}')}" for n, v in headers)
+            # wget (busybox/alpine) first; debian-slim images ship curl but
+            # no wget, so try that next; if neither binary exists, replay a
+            # raw HTTP/1.0 request over bash's /dev/tcp and read the status
+            # line ourselves. K8s httpGet success = a 200-399 status without
+            # following redirects — curl (-f, no -L) matches that exactly;
+            # wget follows redirects natively, a known divergence for 3xx.
+            wget_cmd = f"wget -qO /dev/null{wget_hdr} {url}"
+            curl_cmd = f"curl -fsS -o /dev/null{curl_hdr} {url}"
+            if scheme == "https":
+                # CBA: bash's /dev/tcp is a plaintext socket, no TLS client
+                # ships in a bare shell, so an HTTPS probe always reports
+                # unhealthy once wget and curl are both unavailable.
+                # Ceiling: needs a binary (openssl s_client) baked into the
+                # image; no portable fix otherwise.
+                bash_cmd = "exit 1"
+            else:
+                req_fmt = ("GET %s HTTP/1.0\\r\\nHost: %s\\r\\n"
+                           + "%s\\r\\n" * len(headers) + "\\r\\n")
+                req_args = [path, host] + [f"{n}: {v}" for n, v in headers]
+                printf_cmd = "printf " + shlex.quote(req_fmt) + "".join(
+                    f" {shlex.quote(a)}" for a in req_args)
+                inner = (f"exec 3<>/dev/tcp/{shlex.quote(host)}/{port} && "
+                         f"{printf_cmd} >&3 && head -1 <&3")
+                bash_cmd = (f"bash -c {shlex.quote(inner)} | "
+                            "grep -Eq '^HTTP/[0-9.]+ [23][0-9][0-9]'")
             hc["test"] = ["CMD", "sh", "-c",
-                           f"wget -qO /dev/null {url} || exit 1"]
+                           f"{wget_cmd} || {curl_cmd} || {bash_cmd} || exit 1"]
         elif "tcpSocket" in probe:
             port = probe["tcpSocket"].get("port", 80)
             if isinstance(port, str):
