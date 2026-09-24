@@ -21,68 +21,85 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
     priority = 500
 
     @staticmethod
+    def _exec_healthcheck(probe: dict) -> dict:
+        """Build the healthcheck dict for a K8s `exec` probe."""
+        hc = {}
+        cmd = (probe["exec"].get("command") or [])
+        if cmd:
+            hc["test"] = ["CMD"] + cmd
+        return hc
+
+    @staticmethod
+    def _http_healthcheck(probe: dict, container_ports: list) -> dict:
+        """Build the healthcheck dict for a K8s `httpGet` probe."""
+        http = probe["httpGet"]
+        port = http.get("port") or 80
+        if isinstance(port, str):
+            port = resolve_named_port(port, container_ports)
+        path = http.get("path") or "/"
+        scheme = (http.get("scheme") or "HTTP").lower()
+        host = http.get("host") or "127.0.0.1"  # IPv4 like tcpSocket: "localhost" may resolve to ::1 first
+        headers = [(h["name"], h.get("value") or "")
+                   for h in (http.get("httpHeaders") or []) if h and h.get("name")]
+        url = shlex.quote(f"{scheme}://{host}:{port}{path}")
+        wget_hdr = "".join(f" --header={shlex.quote(f'{n}: {v}')}" for n, v in headers)
+        curl_hdr = "".join(f" -H {shlex.quote(f'{n}: {v}')}" for n, v in headers)
+        # wget (busybox/alpine) first; debian-slim images ship curl but
+        # no wget, so try that next; if neither binary exists, replay a
+        # raw HTTP/1.0 request over bash's /dev/tcp and read the status
+        # line ourselves. K8s httpGet success = a 200-399 status without
+        # following redirects — curl (-f, no -L) matches that exactly;
+        # wget follows redirects natively, a known divergence for 3xx.
+        wget_cmd = f"wget -qO /dev/null{wget_hdr} {url}"
+        curl_cmd = f"curl -fsS -o /dev/null{curl_hdr} {url}"
+        if scheme == "https":
+            # CBA: bash's /dev/tcp is a plaintext socket, no TLS client
+            # ships in a bare shell, so an HTTPS probe always reports
+            # unhealthy once wget and curl are both unavailable.
+            # Ceiling: needs a binary (openssl s_client) baked into the
+            # image; no portable fix otherwise.
+            bash_cmd = "exit 1"
+        else:
+            req_fmt = ("GET %s HTTP/1.0\\r\\nHost: %s\\r\\n"
+                       + "%s\\r\\n" * len(headers) + "\\r\\n")
+            req_args = [path, host] + [f"{n}: {v}" for n, v in headers]
+            printf_cmd = "printf " + shlex.quote(req_fmt) + "".join(
+                f" {shlex.quote(a)}" for a in req_args)
+            inner = (f"exec 3<>/dev/tcp/{shlex.quote(host)}/{port} && "
+                     f"{printf_cmd} >&3 && head -1 <&3")
+            bash_cmd = (f"bash -c {shlex.quote(inner)} | "
+                        "grep -Eq '^HTTP/[0-9.]+ [23][0-9][0-9]'")
+        return {"test": ["CMD", "sh", "-c",
+                          f"{wget_cmd} || {curl_cmd} || {bash_cmd} || exit 1"]}
+
+    @staticmethod
+    def _tcp_healthcheck(probe: dict, container_ports: list) -> dict:
+        """Build the healthcheck dict for a K8s `tcpSocket` probe."""
+        port = probe["tcpSocket"].get("port", 80)
+        if isinstance(port, str):
+            port = resolve_named_port(port, container_ports)
+        # `cat < /dev/tcp/...` is a bash-ism and always fails under the
+        # dash/busybox `sh` most minimal images ship. Try `nc -z`
+        # (busybox/alpine) first, fall back to bash's /dev/tcp
+        # (debian-slim and friends, which have bash but no nc).
+        # CBA: distroless images have neither — healthcheck always
+        # fails there; no portable fix without shipping a binary in.
+        return {"test": ["CMD", "sh", "-c",
+                          f"nc -z 127.0.0.1 {port} || "
+                          f"bash -c ': </dev/tcp/127.0.0.1/{port}' || exit 1"]}
+
+    @staticmethod
     def _probe_to_healthcheck(probe: dict, container_ports: list | None = None) -> dict | None:
         """Convert a K8s probe to a Compose healthcheck dict."""
         if not probe:
             return None
-        hc = {}
+        ports = container_ports or []
         if "exec" in probe:
-            cmd = (probe["exec"].get("command") or [])
-            if cmd:
-                hc["test"] = ["CMD"] + cmd
+            hc = SimpleWorkloadProvider._exec_healthcheck(probe)
         elif "httpGet" in probe:
-            http = probe["httpGet"]
-            port = http.get("port") or 80
-            if isinstance(port, str):
-                port = resolve_named_port(port, container_ports or [])
-            path = http.get("path") or "/"
-            scheme = (http.get("scheme") or "HTTP").lower()
-            host = http.get("host") or "127.0.0.1"  # IPv4 like tcpSocket: "localhost" may resolve to ::1 first
-            headers = [(h["name"], h.get("value") or "")
-                       for h in (http.get("httpHeaders") or []) if h and h.get("name")]
-            url = shlex.quote(f"{scheme}://{host}:{port}{path}")
-            wget_hdr = "".join(f" --header={shlex.quote(f'{n}: {v}')}" for n, v in headers)
-            curl_hdr = "".join(f" -H {shlex.quote(f'{n}: {v}')}" for n, v in headers)
-            # wget (busybox/alpine) first; debian-slim images ship curl but
-            # no wget, so try that next; if neither binary exists, replay a
-            # raw HTTP/1.0 request over bash's /dev/tcp and read the status
-            # line ourselves. K8s httpGet success = a 200-399 status without
-            # following redirects — curl (-f, no -L) matches that exactly;
-            # wget follows redirects natively, a known divergence for 3xx.
-            wget_cmd = f"wget -qO /dev/null{wget_hdr} {url}"
-            curl_cmd = f"curl -fsS -o /dev/null{curl_hdr} {url}"
-            if scheme == "https":
-                # CBA: bash's /dev/tcp is a plaintext socket, no TLS client
-                # ships in a bare shell, so an HTTPS probe always reports
-                # unhealthy once wget and curl are both unavailable.
-                # Ceiling: needs a binary (openssl s_client) baked into the
-                # image; no portable fix otherwise.
-                bash_cmd = "exit 1"
-            else:
-                req_fmt = ("GET %s HTTP/1.0\\r\\nHost: %s\\r\\n"
-                           + "%s\\r\\n" * len(headers) + "\\r\\n")
-                req_args = [path, host] + [f"{n}: {v}" for n, v in headers]
-                printf_cmd = "printf " + shlex.quote(req_fmt) + "".join(
-                    f" {shlex.quote(a)}" for a in req_args)
-                inner = (f"exec 3<>/dev/tcp/{shlex.quote(host)}/{port} && "
-                         f"{printf_cmd} >&3 && head -1 <&3")
-                bash_cmd = (f"bash -c {shlex.quote(inner)} | "
-                            "grep -Eq '^HTTP/[0-9.]+ [23][0-9][0-9]'")
-            hc["test"] = ["CMD", "sh", "-c",
-                           f"{wget_cmd} || {curl_cmd} || {bash_cmd} || exit 1"]
+            hc = SimpleWorkloadProvider._http_healthcheck(probe, ports)
         elif "tcpSocket" in probe:
-            port = probe["tcpSocket"].get("port", 80)
-            if isinstance(port, str):
-                port = resolve_named_port(port, container_ports or [])
-            # `cat < /dev/tcp/...` is a bash-ism and always fails under the
-            # dash/busybox `sh` most minimal images ship. Try `nc -z`
-            # (busybox/alpine) first, fall back to bash's /dev/tcp
-            # (debian-slim and friends, which have bash but no nc).
-            # CBA: distroless images have neither — healthcheck always
-            # fails there; no portable fix without shipping a binary in.
-            hc["test"] = ["CMD", "sh", "-c",
-                           f"nc -z 127.0.0.1 {port} || "
-                           f"bash -c ': </dev/tcp/127.0.0.1/{port}' || exit 1"]
+            hc = SimpleWorkloadProvider._tcp_healthcheck(probe, ports)
         else:
             return None
         if "periodSeconds" in probe:
