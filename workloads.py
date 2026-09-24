@@ -355,13 +355,13 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             return None
 
         result = self._convert_init_containers(pod_spec, name, ctx, vcts=vcts, sts_name=sts_name)
-        svc = self._build_service(containers[0], pod_spec, meta, pod_labels, full,
+        svc = self._build_service(containers[0], pod_spec, pod_labels, full,
                                   ctx, restart_policy, vcts, sts_name)
         return self._assemble_workload_services(
             pod_spec, name, ctx, restart_policy, vcts, sts_name, containers, result, svc)
 
     @staticmethod
-    def _build_service(container: dict, pod_spec: dict, meta: dict, pod_labels: dict, full: str,
+    def _build_service(container: dict, pod_spec: dict, pod_labels: dict, full: str,
                        ctx: ConvertContext, restart_policy: str,
                        vcts: list | None, sts_name: str | None = None) -> dict:
         """Build a compose service dict from a K8s container spec."""
