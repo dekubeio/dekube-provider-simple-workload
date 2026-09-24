@@ -350,9 +350,10 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
 
         limits = (container.get("resources") or {}).get("limits") or {}
         deploy_limits = {}
-        if "memory" in limits:
+        # null = absent (Helm-rendered `limits: {memory: null}` from a disabled override)
+        if limits.get("memory"):
             deploy_limits["memory"] = SimpleWorkloadProvider._k8s_mem_to_compose(limits["memory"])
-        if "cpu" in limits:
+        if limits.get("cpu"):
             deploy_limits["cpus"] = SimpleWorkloadProvider._k8s_cpu_to_compose(limits["cpu"])
         if deploy_limits:
             svc["deploy"] = {"resources": {"limits": deploy_limits}}
