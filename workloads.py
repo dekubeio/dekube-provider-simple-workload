@@ -289,6 +289,52 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 services.update(result)
         return ProviderResult(services=services)
 
+    @staticmethod
+    def _skip_manifest(manifest: dict, name: str, full: str, ctx: ConvertContext) -> bool:
+        """True (warning already logged where relevant) if this manifest is not converted."""
+        if is_excluded(name, ctx.config.get("exclude", [])):
+            return True
+        # Skip workloads scaled to zero (e.g. disabled AI services)
+        replicas = (manifest.get("spec") or {}).get("replicas")
+        if replicas is not None and replicas == 0:
+            ctx.warnings.append(f"{full} has replicas: 0 — skipped")
+            return True
+        return False
+
+    @staticmethod
+    def _resolve_pod_spec(manifest: dict, meta: dict, spec: dict) -> tuple[dict, dict]:
+        """Return (pod_spec, pod_labels) — a Pod carries these at the top level,
+        every other workload kind nests them under spec.template."""
+        if manifest.get("kind") == "Pod":
+            return spec, meta.get("labels") or {}
+        template = spec.get("template") or {}
+        return template.get("spec") or {}, (template.get("metadata") or {}).get("labels") or {}
+
+    @staticmethod
+    def _assemble_workload_services(pod_spec: dict, name: str, ctx: ConvertContext,
+                                    restart_policy: str, vcts: list | None, sts_name: str | None,
+                                    containers: list, result: dict, svc: dict) -> dict:
+        """Wire init/sidecar/native-sidecar dependencies onto the main service and merge
+        them all into the service map for one workload manifest."""
+        init_names = [k for k in result]
+        if init_names:
+            svc.setdefault("depends_on", {}).update(
+                {n: {"condition": "service_completed_successfully"} for n in init_names})
+        result[name] = svc
+
+        native = SimpleWorkloadProvider._convert_native_sidecars(
+            pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts, sts_name=sts_name)
+        if len(containers) > 1 or native:
+            # network_mode: container:<cn> needs an exact container name
+            project = ctx.config.get("name", "")
+            cn = f"{project}-{name}" if project else name
+            svc["container_name"] = cn
+        if len(containers) > 1:
+            result.update(SimpleWorkloadProvider._convert_sidecar_containers(
+                pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts, sts_name=sts_name))
+        result.update(native)
+        return result
+
     def _convert_one(self, manifest: dict, ctx: ConvertContext,
                      restart_policy: str = "always") -> dict | None:
         """Convert a single workload manifest to compose service(s)."""
@@ -296,24 +342,11 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         name = meta.get("name", "unknown")
         full = f"{manifest.get('kind', '?')}/{name}"
 
-        if is_excluded(name, ctx.config.get("exclude", [])):
-            return None
-
-        # Skip workloads scaled to zero (e.g. disabled AI services)
-        replicas = (manifest.get("spec") or {}).get("replicas")
-        if replicas is not None and replicas == 0:
-            ctx.warnings.append(f"{full} has replicas: 0 — skipped")
+        if self._skip_manifest(manifest, name, full, ctx):
             return None
 
         spec = manifest.get("spec") or {}
-        kind = manifest.get("kind", "")
-        if kind == "Pod":
-            pod_spec = spec
-            pod_labels = meta.get("labels") or {}
-        else:
-            template = spec.get("template") or {}
-            pod_spec = template.get("spec") or {}
-            pod_labels = (template.get("metadata") or {}).get("labels") or {}
+        pod_spec, pod_labels = self._resolve_pod_spec(manifest, meta, spec)
         vcts = spec.get("volumeClaimTemplates")  # StatefulSet only
         sts_name = name if vcts else None
         containers = pod_spec.get("containers") or []
@@ -324,25 +357,8 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         result = self._convert_init_containers(pod_spec, name, ctx, vcts=vcts, sts_name=sts_name)
         svc = self._build_service(containers[0], pod_spec, meta, pod_labels, full,
                                   ctx, restart_policy, vcts, sts_name)
-        init_names = [k for k in result]
-        if init_names:
-            svc.setdefault("depends_on", {}).update(
-                {n: {"condition": "service_completed_successfully"} for n in init_names})
-        result[name] = svc
-
-        native = self._convert_native_sidecars(pod_spec, name, ctx, restart_policy=restart_policy,
-                                               vcts=vcts, sts_name=sts_name)
-        if len(containers) > 1 or native:
-            # network_mode: container:<cn> needs an exact container name
-            project = ctx.config.get("name", "")
-            cn = f"{project}-{name}" if project else name
-            svc["container_name"] = cn
-        if len(containers) > 1:
-            result.update(self._convert_sidecar_containers(
-                pod_spec, name, ctx, restart_policy=restart_policy, vcts=vcts, sts_name=sts_name))
-        result.update(native)
-
-        return result
+        return self._assemble_workload_services(
+            pod_spec, name, ctx, restart_policy, vcts, sts_name, containers, result, svc)
 
     @staticmethod
     def _build_service(container: dict, pod_spec: dict, meta: dict, pod_labels: dict, full: str,
