@@ -45,8 +45,15 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
             port = probe["tcpSocket"].get("port", 80)
             if isinstance(port, str):
                 port = resolve_named_port(port, container_ports or [])
+            # `cat < /dev/tcp/...` is a bash-ism and always fails under the
+            # dash/busybox `sh` most minimal images ship. Try `nc -z`
+            # (busybox/alpine) first, fall back to bash's /dev/tcp
+            # (debian-slim and friends, which have bash but no nc).
+            # CBA: distroless images have neither — healthcheck always
+            # fails there; no portable fix without shipping a binary in.
             hc["test"] = ["CMD", "sh", "-c",
-                           f"cat < /dev/tcp/localhost/{port} || exit 1"]
+                           f"nc -z 127.0.0.1 {port} || "
+                           f"bash -c ': </dev/tcp/127.0.0.1/{port}' || exit 1"]
         else:
             return None
         if "periodSeconds" in probe:
