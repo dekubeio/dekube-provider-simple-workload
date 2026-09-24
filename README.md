@@ -20,6 +20,7 @@ dekube-engine >= v1.6.0 — passes `sts_name=` to `convert_volume_mounts`, which
 - `StatefulSet`
 - `DaemonSet`
 - `Job`
+- `Pod`
 
 ## Install
 
