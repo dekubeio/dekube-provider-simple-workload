@@ -86,8 +86,14 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
 
     @staticmethod
     def _get_exposed_ports(workload_labels: dict, container_ports: list,
-                           services_by_selector: dict) -> list[str]:
-        """Determine which ports to expose based on K8s Service type."""
+                           services_by_selector: dict,
+                           warnings: list | None = None) -> list[str]:
+        """Determine which ports to expose based on K8s Service type.
+
+        LoadBalancer publishes on `port` (the external LB port); NodePort
+        publishes on `nodePort`, falling back to `port` when unset (K8s
+        would otherwise auto-allocate it, which we can't know here).
+        """
         ports = []
         for _sel_key, svc_info in services_by_selector.items():
             svc_labels = svc_info.get("selector") or {}
@@ -99,13 +105,24 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                     for sp in svc_info.get("ports") or []:
                         if not sp:
                             continue
-                        target = sp.get("targetPort", sp.get("port"))
+                        # null = absent: K8s defaults targetPort to port
+                        target = sp.get("targetPort") or sp.get("port")
                         if isinstance(target, str):
                             target = resolve_named_port(target, container_ports)
-                        node_port = sp.get("nodePort", sp.get("port"))
-                        if isinstance(node_port, str):
-                            node_port = resolve_named_port(node_port, container_ports)
-                        ports.append(f"{node_port}:{target}")
+                        if svc_type == "LoadBalancer":
+                            host_port = sp.get("port")
+                        else:
+                            host_port = sp.get("nodePort") or sp.get("port")
+                        if isinstance(host_port, str):
+                            host_port = resolve_named_port(host_port, container_ports)
+                        protocol = (sp.get("protocol") or "TCP").upper()
+                        suffix = "/udp" if protocol == "UDP" else ""
+                        if protocol == "SCTP":
+                            if warnings is not None:
+                                warnings.append(
+                                    f"port {host_port}:{target} uses SCTP — "
+                                    "compose has no SCTP support, published as TCP")
+                        ports.append(f"{host_port}:{target}{suffix}")
         return ports
 
     @staticmethod
@@ -306,7 +323,8 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         exposed_ports = SimpleWorkloadProvider._get_exposed_ports(
             pod_labels,
             container.get("ports") or [],
-            ctx.services_by_selector)
+            ctx.services_by_selector,
+            warnings=ctx.warnings)
         if exposed_ports:
             svc["ports"] = exposed_ports
 
