@@ -37,7 +37,7 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
                 port = resolve_named_port(port, container_ports or [])
             path = http.get("path") or "/"
             scheme = (http.get("scheme") or "HTTP").lower()
-            host = http.get("host") or "localhost"
+            host = http.get("host") or "127.0.0.1"  # IPv4 like tcpSocket: "localhost" may resolve to ::1 first
             headers = [(h["name"], h.get("value") or "")
                        for h in (http.get("httpHeaders") or []) if h and h.get("name")]
             url = shlex.quote(f"{scheme}://{host}:{port}{path}")
