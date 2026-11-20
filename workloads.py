@@ -1,6 +1,7 @@
 """Workload conversion — Deployment, StatefulSet, DaemonSet, Job to compose services."""
 # pylint: disable=too-many-locals
 
+import re
 import shlex
 
 from dekube import (  # pylint: disable=import-error  # h2c resolves at runtime
@@ -26,7 +27,10 @@ class SimpleWorkloadProvider(Provider):  # pylint: disable=too-few-public-method
         hc = {}
         cmd = (probe["exec"].get("command") or [])
         if cmd:
-            hc["test"] = ["CMD"] + cmd
+            # Compose interpolates $VAR in the whole file at parse time: `sh -c '... $HOSTNAME'`
+            # would run against the host's value (usually empty). Same escaping as command/entrypoint.
+            hc["test"] = ["CMD"] + [re.sub(r'\$(?=[A-Za-z_{])', '$$', c) if isinstance(c, str) else c
+                                    for c in cmd]
         return hc
 
     @staticmethod
